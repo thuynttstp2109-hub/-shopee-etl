@@ -1,0 +1,68 @@
+-- Kho dữ liệu dạng star schema
+-- Chạy tự động khi container postgres-dw khởi tạo lần đầu.
+
+CREATE TABLE IF NOT EXISTS dim_date (
+    date_key      DATE PRIMARY KEY,
+    year          SMALLINT NOT NULL,
+    month         SMALLINT NOT NULL,
+    day           SMALLINT NOT NULL,
+    day_of_week   SMALLINT NOT NULL,   -- 1 = Thứ Hai ... 7 = Chủ Nhật
+    is_weekend    BOOLEAN  NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_shop (
+    shop_id       BIGINT PRIMARY KEY,
+    shop_name     TEXT NOT NULL,
+    shop_type     TEXT NOT NULL,       -- mall / preferred / preferred_plus / normal
+    first_seen    DATE NOT NULL,
+    last_seen     DATE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dim_product (
+    item_id       BIGINT PRIMARY KEY,
+    product_name  TEXT NOT NULL,
+    shop_id       BIGINT NOT NULL REFERENCES dim_shop(shop_id),
+    category_id   BIGINT,
+    category_path TEXT,
+    image_url     TEXT,
+    product_link  TEXT,
+    offer_link    TEXT,
+    first_seen    DATE NOT NULL,
+    last_seen     DATE NOT NULL
+);
+
+-- Mỗi dòng = trạng thái của một sản phẩm trong một ngày
+CREATE TABLE IF NOT EXISTS fact_product_daily (
+    snapshot_date   DATE   NOT NULL REFERENCES dim_date(date_key),
+    item_id         BIGINT NOT NULL REFERENCES dim_product(item_id),
+    shop_id         BIGINT NOT NULL REFERENCES dim_shop(shop_id),
+    keyword         TEXT,
+    price           NUMERIC(14, 2) NOT NULL,
+    price_min       NUMERIC(14, 2),
+    price_max       NUMERIC(14, 2),
+    discount_rate   SMALLINT,
+    sales           INTEGER,
+    rating_star     NUMERIC(3, 2),
+    commission_rate NUMERIC(6, 4),
+    loaded_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (snapshot_date, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_item ON fact_product_daily (item_id);
+CREATE INDEX IF NOT EXISTS idx_fact_shop ON fact_product_daily (shop_id);
+
+-- View tiện cho dashboard: biến động giá so với ngày trước đó
+CREATE OR REPLACE VIEW v_price_change AS
+SELECT
+    f.snapshot_date,
+    f.item_id,
+    p.product_name,
+    s.shop_name,
+    f.price,
+    LAG(f.price) OVER w                         AS prev_price,
+    f.price - LAG(f.price) OVER w               AS price_diff,
+    f.sales - LAG(f.sales) OVER w               AS sales_gained
+FROM fact_product_daily f
+JOIN dim_product p USING (item_id)
+JOIN dim_shop    s ON s.shop_id = f.shop_id
+WINDOW w AS (PARTITION BY f.item_id ORDER BY f.snapshot_date);
