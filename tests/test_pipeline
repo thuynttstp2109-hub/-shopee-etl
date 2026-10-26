@@ -1,0 +1,94 @@
+"""Test pipeline ở chế độ mock: không cần mạng, MinIO hay PostgreSQL.
+
+Chạy: pytest -q
+"""
+import hashlib
+import json
+import sqlite3
+import sys
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from shopee_etl.config import Settings  # noqa: E402
+from shopee_etl.extract import raw_prefix, run_extract, slugify  # noqa: E402
+from shopee_etl.load import load_dataframe  # noqa: E402
+from shopee_etl.shopee_client import build_signature  # noqa: E402
+from shopee_etl.storage import LakeStorage  # noqa: E402
+from shopee_etl.transform import DataQualityError, check_quality, clean, flatten_raw  # noqa: E402
+
+D1, D2 = date(2026, 10, 21), date(2026, 10, 22)
+
+
+@pytest.fixture
+def lake(tmp_path):
+    settings = Settings(mock=True, storage_backend="local", local_root=str(tmp_path),
+                        keywords=["tai nghe bluetooth", "bàn phím cơ"], page_limit=20, max_pages=2)
+    return settings, LakeStorage(settings)
+
+
+def _transformed(storage, d):
+    keys = storage.list_keys(raw_prefix(d))
+    return clean(flatten_raw([json.loads(storage.get_bytes(k)) for k in keys]))
+
+
+def test_signature_matches_spec():
+    payload = '{"query":"{ x }"}'
+    expected = hashlib.sha256(f"123{1700000000}{payload}secret".encode()).hexdigest()
+    assert build_signature("123", 1700000000, payload, "secret") == expected
+
+
+def test_slugify_vietnamese():
+    assert slugify("Bàn phím cơ Đẹp") == "ban-phim-co-dep"
+
+
+def test_extract_writes_raw_pages(lake):
+    settings, storage = lake
+    assert run_extract(settings, storage, D1) == 80  # 2 từ khóa x 2 trang x 20
+    keys = storage.list_keys(raw_prefix(D1))
+    assert len(keys) == 4 and all(k.endswith(".json") for k in keys)
+
+
+def test_transform_types_and_quality(lake):
+    settings, storage = lake
+    run_extract(settings, storage, D1)
+    df = _transformed(storage, D1)
+    assert len(df) == 80
+    assert df["item_id"].is_unique
+    assert df["price"].dtype.kind == "f" and (df["price"] > 0).all()
+    assert set(df["shop_type"]) <= {"mall", "preferred", "preferred_plus", "normal"}
+    check_quality(df)
+
+
+def test_quality_check_catches_bad_price(lake):
+    settings, storage = lake
+    run_extract(settings, storage, D1)
+    df = _transformed(storage, D1)
+    df.loc[0, "price"] = 0
+    with pytest.raises(DataQualityError):
+        check_quality(df)
+
+
+def test_load_is_idempotent_and_tracks_history(lake):
+    settings, storage = lake
+    conn = sqlite3.connect(":memory:")
+    # SQLite đọc được schema Postgres sau khi bỏ các phần riêng của Postgres
+    schema = (ROOT / "sql/schema.sql").read_text().split("CREATE OR REPLACE VIEW")[0]
+    schema = schema.replace("TIMESTAMPTZ NOT NULL DEFAULT now()", "TEXT")
+    conn.executescript(schema)
+
+    for d in (D1, D2):
+        run_extract(settings, storage, d)
+        load_dataframe(conn, _transformed(storage, d), d, placeholder="?")
+    load_dataframe(conn, _transformed(storage, D2), D2, placeholder="?")  # chạy lại
+
+    q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+    assert q("SELECT COUNT(*) FROM fact_product_daily") == 160
+    assert q("SELECT COUNT(*) FROM dim_product") == 80
+    assert q("SELECT COUNT(DISTINCT snapshot_date) FROM fact_product_daily") == 2
+    assert q("SELECT MIN(first_seen) FROM dim_product") == D1.isoformat()
+    assert q("SELECT MAX(last_seen) FROM dim_product") == D2.isoformat()
