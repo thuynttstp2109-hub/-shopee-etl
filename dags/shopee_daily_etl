@@ -1,0 +1,62 @@
+"""DAG chạy hằng ngày lúc 7h sáng giờ Việt Nam: extract -> transform -> load."""
+from __future__ import annotations
+
+import logging
+from datetime import date, timedelta
+
+import pendulum
+from airflow.decorators import dag, task
+
+LOCAL_TZ = pendulum.timezone("Asia/Ho_Chi_Minh")
+
+
+def _snapshot_date(data_interval_end) -> date:
+    # Ngày snapshot = ngày (giờ VN) mà DAG thực sự chạy
+    return data_interval_end.in_timezone(LOCAL_TZ).date()
+
+
+@dag(
+    dag_id="shopee_daily_etl",
+    schedule="0 7 * * *",
+    start_date=pendulum.datetime(2026, 10, 1, tz=LOCAL_TZ),
+    catchup=False,
+    max_active_runs=1,
+    default_args={"retries": 2, "retry_delay": timedelta(minutes=10)},
+    tags=["shopee", "etl"],
+)
+def shopee_daily_etl():
+    @task
+    def extract(data_interval_end=None) -> str:
+        from shopee_etl.config import get_settings
+        from shopee_etl.extract import run_extract
+        from shopee_etl.storage import LakeStorage
+
+        settings = get_settings()
+        d = _snapshot_date(data_interval_end)
+        n = run_extract(settings, LakeStorage(settings), d)
+        logging.info("Extract %d bản ghi", n)
+        return d.isoformat()
+
+    @task
+    def transform(snapshot: str) -> str:
+        from shopee_etl.config import get_settings
+        from shopee_etl.storage import LakeStorage
+        from shopee_etl.transform import run_transform
+
+        settings = get_settings()
+        run_transform(LakeStorage(settings), date.fromisoformat(snapshot))
+        return snapshot
+
+    @task
+    def load(snapshot: str) -> None:
+        from shopee_etl.config import get_settings
+        from shopee_etl.load import run_load
+        from shopee_etl.storage import LakeStorage
+
+        settings = get_settings()
+        run_load(LakeStorage(settings), settings.dw_dsn, date.fromisoformat(snapshot))
+
+    load(transform(extract()))
+
+
+shopee_daily_etl()
