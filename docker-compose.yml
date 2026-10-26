@@ -1,0 +1,79 @@
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+  AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Asia/Ho_Chi_Minh
+  PYTHONPATH: /opt/airflow/src
+  # Cài thêm thư viện khi container khởi động (đủ cho môi trường học; production nên build image riêng)
+  _PIP_ADDITIONAL_REQUIREMENTS: "boto3 pyarrow psycopg2-binary"
+
+services:
+  # ---------- Data lake (tương thích S3) ----------
+  minio:
+    # Bản community của MinIO không còn được cập nhật; vẫn dùng ổn để học.
+    # Có thể đổi sang bản fork do cộng đồng duy trì: pgsty/minio
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # giao diện web
+    volumes:
+      - minio-data:/data
+
+  # ---------- Kho dữ liệu ----------
+  postgres-dw:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dw
+      POSTGRES_PASSWORD: dw
+      POSTGRES_DB: shopee_dw
+    ports:
+      - "5433:5432"
+    volumes:
+      - dw-data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  # ---------- Airflow ----------
+  airflow-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+
+  airflow:
+    image: apache/airflow:2.10.5-python3.11
+    depends_on: [airflow-db, minio, postgres-dw]
+    env_file: .env
+    environment: *airflow-env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+    command: >
+      bash -c "airflow db migrate &&
+               (airflow users create --username admin --password admin --firstname Admin
+                 --lastname User --role Admin --email admin@example.com || true) &&
+               (airflow scheduler &) &&
+               exec airflow webserver"
+
+  # ---------- Dashboard ----------
+  # Không chạy mặc định để tiết kiệm RAM. Bật bằng: docker compose --profile dashboard up -d
+  metabase:
+    image: metabase/metabase:latest
+    profiles: [dashboard]
+    depends_on: [postgres-dw]
+    ports:
+      - "3000:3000"
+
+volumes:
+  minio-data:
+  dw-data:
+  airflow-db-data:
