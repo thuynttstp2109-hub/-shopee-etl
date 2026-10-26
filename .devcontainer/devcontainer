@@ -1,0 +1,15 @@
+{
+  "name": "shopee-etl",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "hostRequirements": { "cpus": 2, "memory": "8gb" },
+  "postCreateCommand": "pip install -r requirements.txt && cp -n .env.example .env",
+  "forwardPorts": [8080, 9001, 3000],
+  "portsAttributes": {
+    "8080": { "label": "Airflow" },
+    "9001": { "label": "MinIO console" },
+    "3000": { "label": "Metabase" }
+  }
+}
