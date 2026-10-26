@@ -1,0 +1,41 @@
+"""Chạy pipeline trực tiếp, không cần Airflow (tiện khi debug).
+
+Ví dụ:
+    python scripts/run_local.py                        # hôm nay, đủ 3 bước
+    python scripts/run_local.py --date 2026-10-20      # chạy lại một ngày cụ thể
+    python scripts/run_local.py --skip-load            # chỉ extract + transform
+"""
+import argparse
+import logging
+import sys
+from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from shopee_etl.config import get_settings  # noqa: E402
+from shopee_etl.extract import run_extract  # noqa: E402
+from shopee_etl.storage import LakeStorage  # noqa: E402
+from shopee_etl.transform import run_transform  # noqa: E402
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", type=date.fromisoformat, default=date.today())
+    parser.add_argument("--skip-load", action="store_true")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    settings = get_settings()
+    storage = LakeStorage(settings)
+
+    run_extract(settings, storage, args.date)
+    run_transform(storage, args.date)
+    if not args.skip_load:
+        from shopee_etl.load import run_load
+
+        run_load(storage, settings.dw_dsn, args.date)
+
+
+if __name__ == "__main__":
+    main()
