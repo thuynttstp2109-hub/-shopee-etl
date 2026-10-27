@@ -112,4 +112,7 @@ display(spark.table(T("bronze_product_offers")).where(F.col("snapshot_date") == 
 # COMMAND ----------
 
 # Chuyển ngày cho các task sau trong Lakeflow Job (chạy tay thì lệnh này không làm gì)
-dbutils.jobs.taskValues.set(key="snapshot_date", value=snapshot.isoformat())
+try:
+    dbutils.jobs.taskValues.set(key="snapshot_date", value=snapshot.isoformat())
+except Exception:
+    pass  # không chạy trong job (chạy tay hoặc được notebook khác gọi)
