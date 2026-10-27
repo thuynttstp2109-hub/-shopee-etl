@@ -24,13 +24,41 @@ def T(name: str) -> str:
 
 
 # Dùng lại code Python của project (thư mục src/) để không phải viết lại phần gọi API.
-# Notebook nằm trong shopee-etl/databricks/, nên src/ ở thư mục cha.
-PROJECT_ROOT = Path(os.getcwd()).parent
-if not (PROJECT_ROOT / "src" / "shopee_etl").exists():
+# Không dựa vào os.getcwd(): trên serverless, notebook được gọi bằng dbutils.notebook.run
+# có thể có thư mục làm việc khác (ví dụ .conversations). Thử lần lượt nhiều chỗ.
+WORKSPACE_ROOT = Path("/Workspace")
+
+
+def _find_project_root() -> Path:
+    candidates = []
+    try:  # 1. Từ đường dẫn của chính notebook đang chạy
+        nb = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+        nb_dir = Path(nb if nb.startswith(str(WORKSPACE_ROOT)) else f"{WORKSPACE_ROOT}{nb}").parent
+        candidates += [nb_dir.parent, nb_dir]
+    except Exception:
+        pass
+    cwd = Path(os.getcwd())  # 2. Từ thư mục làm việc
+    candidates += [cwd.parent, cwd]
+    for c in candidates:
+        if (c / "src" / "shopee_etl").is_dir():
+            return c
+    try:  # 3. Tìm trong thư mục cá nhân (Git folder hoặc bundle deploy)
+        user = spark.sql("SELECT current_user()").first()[0]
+        home = WORKSPACE_ROOT / "Users" / user
+        for pattern in ("*/src/shopee_etl", ".bundle/*/*/files/src/shopee_etl"):
+            hits = sorted(p for p in home.glob(pattern) if p.is_dir())
+            if hits:
+                return hits[0].parent.parent
+    except Exception:
+        pass
     raise RuntimeError(
-        f"Không thấy {PROJECT_ROOT}/src/shopee_etl. Hãy đưa cả thư mục shopee-etl lên workspace "
-        "(Git folder hoặc databricks bundle deploy), đừng chỉ tải riêng các notebook."
+        "Không tìm thấy thư mục src/shopee_etl. Hãy đưa cả project lên workspace "
+        "(Git folder có đủ databricks/, src/, sql/), đừng chỉ tải riêng các notebook."
     )
+
+
+PROJECT_ROOT = _find_project_root()
+print("Project:", PROJECT_ROOT)
 if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
